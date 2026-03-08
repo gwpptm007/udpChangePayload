@@ -23,6 +23,11 @@
 ### 多队列多线程
 通过 `iptables --queue-balance 0:3` 将数据包分配至4个队列，并启用4个线程并行处理，提升高流量环境下的吞吐量。
 
+**nfq_create_queue 全部创建成功**
+- 每个队列使用独立的 `nfq_handle`（避免多线程共享同一个 netlink fd 导致的丢包/创建失败）。
+- callback 的任意分支都必须下发 verdict（不修改时使用 `nfq_set_verdict(..., NF_ACCEPT, 0, NULL)` 放行原始包）。
+- `recv()` 缓冲区至少 64KB，并尝试增大 netlink socket 的 `SO_RCVBUF`，降低 `user_dropped`。
+
 ---
 
 ## 目录结构
@@ -118,4 +123,32 @@ log_level: info, error, debug. logfile: /tmp/changepayload.log
 -h or -H: show this help
 ```
 
++ 常见问题处理
+```plain
+1. 异常退出后，再启动失败报错 Another instance of changepayload is running.
+单实例锁卡住的问题
+ls -l /dev/shm | grep changepayload
+系统会把信号量映射到 /dev/shm 下的文件 /dev/shm/sem.changepayload_sem
+删除 sudo rm /dev/shm/sem.changepayload_sem 即可
+
+2. 排查 NFQUEUE 队列是否都被订阅（--queue-balance 0:3 必须 0/1/2/3 都有订阅者）
+cat /proc/net/netfilter/nfnetlink_queue
+
+示例：
+0  29091     0 2 65531     0     0        0  1
+1  29091     0 2 65531     0     0        0  1
+2  29091     0 2 65531     0     0        0  1
+3  29091     0 2 65531     0     0        0  1
+
+每行代表一个队列，列含义如下：
+(1) queue_id：队列号（对应 iptables 的 --queue-num / --queue-balance）
+(2) portid：订阅该队列的 netlink port id（通常可用于定位是哪个进程在消费）
+(3) queue_total：当前在队列里等待用户态处理的包数量
+(4) copy_mode：拷贝模式，1=仅元数据，2=拷贝 payload
+(5) copy_range：最多拷贝多少字节到用户态
+(6) queue_dropped：内核因队列等待 verdict 的包太多而丢弃的计数（常见原因：用户态处理慢/未下发 verdict）
+(7) user_dropped：netlink 子系统丢弃的计数（常见原因：socket buffer 满，用户态收包不够快；可增大 SO_RCVBUF）
+(8) id_sequence：最近一次入队的包序号（单调递增）
+最后一列恒为 1（兼容字段，可忽略）
+```
 ---
